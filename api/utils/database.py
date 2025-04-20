@@ -134,13 +134,14 @@ class BottleDatabase:
         with open(self.metadata_file, 'w') as f:
             json.dump(self.metadata, f, indent=2)
     
-    def find_matches(self, query_features: np.ndarray, top_k: int = 3) -> List[Dict]:
+    def find_matches(self, query_features: np.ndarray, top_k: int = 3, confidence_threshold: float = 0.0) -> List[Dict]:
         """
         Find the top-k matches for the query features.
         
         Args:
             query_features: Feature vector from CLIP
             top_k: Number of top matches to return
+            confidence_threshold: Minimum confidence score (0.0-1.0) for a match to be included
             
         Returns:
             List of BottleMatch objects
@@ -153,8 +154,9 @@ class BottleDatabase:
             query_features = query_features.reshape(1, -1)
         faiss.normalize_L2(query_features)
         
-        # Search index
-        D, I = self.index.search(query_features, min(top_k, self.index.ntotal))
+        # Search index - retrieve more results than needed to apply threshold filtering
+        max_results = min(max(top_k * 3, 10), self.index.ntotal)  # Get more results to filter
+        D, I = self.index.search(query_features, max_results)
         
         # Convert to BottleMatch objects
         matches = []
@@ -171,14 +173,20 @@ class BottleDatabase:
                 # Distance is inner product, so already in [-1, 1] range
                 confidence = float((distance + 1) / 2)
                 
-                # Create match object
-                match = BottleMatch(
-                    id=bottle_id,
-                    name=self.metadata[bottle_id]["name"],
-                    confidence=confidence,
-                    image_url=self.metadata[bottle_id].get("image_url")
-                )
-                matches.append(match.to_dict())
+                # Only include matches above the threshold
+                if confidence >= confidence_threshold:
+                    # Create match object
+                    match = BottleMatch(
+                        id=bottle_id,
+                        name=self.metadata[bottle_id]["name"],
+                        confidence=confidence,
+                        image_url=self.metadata[bottle_id].get("image_url")
+                    )
+                    matches.append(match.to_dict())
+                    
+                    # Break if we have enough matches
+                    if len(matches) >= top_k:
+                        break
         
         return matches
     

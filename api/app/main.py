@@ -3,7 +3,7 @@ import io
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Body
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Body, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -57,10 +57,15 @@ async def root():
     return {"message": "Whisky Bottle Recognition API"}
 
 @app.post("/api/identify", response_model=BottleResponse)
-async def identify_bottle(file: UploadFile = File(...)):
+async def identify_bottle(
+    file: UploadFile = File(...),
+    confidence_threshold: float = Query(0.5, ge=0.0, le=1.0, description="Minimum confidence score for matches")
+):
     """
     Identify a whisky bottle from an uploaded image.
     Returns top matches with confidence scores.
+    
+    - **confidence_threshold**: Minimum confidence threshold (0.0-1.0) for a match to be included
     """
     start_time = datetime.now()
     
@@ -72,8 +77,8 @@ async def identify_bottle(file: UploadFile = File(...)):
         # Extract features using CLIP model
         features = bottle_processor.extract_features(image)
         
-        # Find matching bottles in the database
-        matches = bottle_db.find_matches(features, top_k=3)
+        # Find matching bottles in the database with confidence threshold
+        matches = bottle_db.find_matches(features, top_k=3, confidence_threshold=confidence_threshold)
         
         # Calculate processing time
         processing_time = (datetime.now() - start_time).total_seconds() * 1000
@@ -86,10 +91,15 @@ async def identify_bottle(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/identify_base64")
-async def identify_bottle_base64(base64_image: str = Body(..., embed=True)):
+async def identify_bottle_base64(
+    base64_image: str = Body(..., embed=True),
+    confidence_threshold: float = Query(0.5, ge=0.0, le=1.0, description="Minimum confidence score for matches")
+):
     """
     Identify a whisky bottle from a base64-encoded image.
     Useful for direct integration with React Native.
+    
+    - **confidence_threshold**: Minimum confidence threshold (0.0-1.0) for a match to be included
     """
     start_time = datetime.now()
     
@@ -101,8 +111,8 @@ async def identify_bottle_base64(base64_image: str = Body(..., embed=True)):
         # Extract features using CLIP model
         features = bottle_processor.extract_features(image)
         
-        # Find matching bottles in the database
-        matches = bottle_db.find_matches(features, top_k=3)
+        # Find matching bottles in the database with confidence threshold
+        matches = bottle_db.find_matches(features, top_k=3, confidence_threshold=confidence_threshold)
         
         # Calculate processing time
         processing_time = (datetime.now() - start_time).total_seconds() * 1000
