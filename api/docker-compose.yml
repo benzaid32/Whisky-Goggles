@@ -8,6 +8,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./static:/app/static
+      - ../images:/app/images 
     environment:
       - PYTHONPATH=/app
     restart: unless-stopped 

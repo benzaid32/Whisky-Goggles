@@ -1,0 +1,207 @@
+ximp
+ort os
+import json
+import glob
+import numpy as np
+import faiss
+from typing import List, Dict, Optional
+import pickle
+
+class BottleMatch:
+    """Data class for bottle matches."""
+    def __init__(self, id: str, name: str, confidence: float, image_url: Optional[str] = None):
+        self.id = id
+        self.name = name
+        self.confidence = confidence
+        self.image_url = image_url
+    
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "confidence": self.confidence,
+            "image_url": self.image_url
+        }
+
+class BottleDatabase:
+    """
+    Manages the database of whisky bottle embeddings using FAISS.
+    Provides methods for adding, searching, and managing bottle data.
+    """
+    
+    def __init__(self, embeddings_dir: str = "data/embeddings", 
+                 metadata_file: str = "data/metadata.json"):
+        """
+        Initialize the bottle database.
+        
+        Args:
+            embeddings_dir: Directory containing embeddings
+            metadata_file: JSON file containing bottle metadata
+        """
+        self.embeddings_dir = embeddings_dir
+        self.metadata_file = metadata_file
+        
+        # Ensure data directories exist
+        os.makedirs(embeddings_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(metadata_file), exist_ok=True)
+        
+        # Initialize FAISS index (vector dimension from CLIP model is 512)
+        self.dimension = 512
+        self.index = faiss.IndexFlatIP(self.dimension)  # Inner product for cosine similarity
+        
+        # Metadata for bottles
+        self.metadata = {}
+        self.id_to_index = {}  # Maps bottle ID to index in FAISS
+        
+        print(f"Initialized BottleDatabase with FAISS index")
+    
+    def load_embeddings(self):
+        """
+        Load precomputed embeddings and metadata.
+        """
+        # Load metadata if it exists
+        if os.path.exists(self.metadata_file):
+            with open(self.metadata_file, 'r') as f:
+                self.metadata = json.load(f)
+            print(f"Loaded metadata for {len(self.metadata)} bottles")
+        
+        # Load embeddings if they exist
+        embedding_files = glob.glob(os.path.join(self.embeddings_dir, "*.npy"))
+        if embedding_files:
+            # Reset index
+            self.index = faiss.IndexFlatIP(self.dimension)
+            
+            # Load and add each embedding
+            for i, embedding_file in enumerate(embedding_files):
+                bottle_id = os.path.basename(embedding_file).replace(".npy", "")
+                self.id_to_index[bottle_id] = i
+                
+                # Load embedding and add to index
+                embedding = np.load(embedding_file)
+                if embedding.ndim == 1:
+                    embedding = embedding.reshape(1, -1)
+                
+                # Ensure embedding is normalized for cosine similarity
+                faiss.normalize_L2(embedding)
+                self.index.add(embedding)
+            
+            print(f"Loaded {self.index.ntotal} embeddings into FAISS index")
+        else:
+            print("No embeddings found. Please run preprocessing first.")
+    
+    def add_bottle(self, bottle_id: str, name: str, features: np.ndarray, 
+                  image_url: Optional[str] = None, save: bool = True):
+        """
+        Add a bottle to the database.
+        
+        Args:
+            bottle_id: Unique ID for the bottle
+            name: Name of the bottle
+            features: Feature vector from CLIP
+            image_url: URL to bottle image
+            save: Whether to save to disk immediately
+        """
+        # Ensure features is 2D
+        if features.ndim == 1:
+            features = features.reshape(1, -1)
+        
+        # Normalize features for cosine similarity
+        faiss.normalize_L2(features)
+        
+        # Add to FAISS index
+        self.index.add(features)
+        
+        # Update mapping
+        idx = self.index.ntotal - 1
+        self.id_to_index[bottle_id] = idx
+        
+        # Update metadata
+        self.metadata[bottle_id] = {
+            "name": name,
+            "image_url": image_url
+        }
+        
+        # Save if requested
+        if save:
+            self._save_bottle(bottle_id, features, idx)
+    
+    def _save_bottle(self, bottle_id: str, features: np.ndarray, idx: int):
+        """Save bottle data to disk."""
+        # Save embedding
+        embedding_file = os.path.join(self.embeddings_dir, f"{bottle_id}.npy")
+        np.save(embedding_file, features)
+        
+        # Save updated metadata
+        with open(self.metadata_file, 'w') as f:
+            json.dump(self.metadata, f, indent=2)
+    
+    def find_matches(self, query_features: np.ndarray, top_k: int = 3) -> List[Dict]:
+        """
+        Find the top-k matches for the query features.
+        
+        Args:
+            query_features: Feature vector from CLIP
+            top_k: Number of top matches to return
+            
+        Returns:
+            List of BottleMatch objects
+        """
+        if self.index.ntotal == 0:
+            return []
+        
+        # Ensure query is 2D and normalized
+        if query_features.ndim == 1:
+            query_features = query_features.reshape(1, -1)
+        faiss.normalize_L2(query_features)
+        
+        # Search index
+        D, I = self.index.search(query_features, min(top_k, self.index.ntotal))
+        
+        # Convert to BottleMatch objects
+        matches = []
+        for i, (distance, idx) in enumerate(zip(D[0], I[0])):
+            # Find bottle_id corresponding to idx
+            bottle_id = None
+            for bid, index in self.id_to_index.items():
+                if index == idx:
+                    bottle_id = bid
+                    break
+            
+            if bottle_id and bottle_id in self.metadata:
+                # Convert cosine similarity (from -1 to 1) to confidence (from 0 to 1)
+                # Distance is inner product, so already in [-1, 1] range
+                confidence = float((distance + 1) / 2)
+                
+                # Create match object
+                match = BottleMatch(
+                    id=bottle_id,
+                    name=self.metadata[bottle_id]["name"],
+                    confidence=confidence,
+                    image_url=self.metadata[bottle_id].get("image_url")
+                )
+                matches.append(match.to_dict())
+        
+        return matches
+    
+    def list_all_bottles(self) -> List[Dict]:
+        """List all bottles in the database."""
+        bottles = []
+        for bottle_id, data in self.metadata.items():
+            bottle = BottleMatch(
+                id=bottle_id,
+                name=data["name"],
+                confidence=1.0,  # Default confidence for listing
+                image_url=data.get("image_url")
+            )
+            bottles.append(bottle.to_dict())
+        return bottles
+    
+    def save_index(self, file_path: str = "data/faiss.index"):
+        """Save the FAISS index to disk."""
+        faiss.write_index(self.index, file_path)
+    
+    def load_index(self, file_path: str = "data/faiss.index"):
+        """Load a FAISS index from disk."""
+        if os.path.exists(file_path):
+            self.index = faiss.read_index(file_path)
+            print(f"Loaded FAISS index with {self.index.ntotal} vectors") 
